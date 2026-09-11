@@ -221,8 +221,13 @@ loadHighValueCards();
 
 async function loadHighValueCards() {
   try {
-    const response = await fetch('/api/chase-cards?search=');
-    savedHighValueCards = ((await response.json()).data || [])
+    let response = await fetch('/api/chase-cards?search=');
+    let payload = response.ok ? await response.json() : null;
+    if (!payload) {
+      response = await fetch('chase-cards.json');
+      payload = { data: response.ok ? await response.json() : [] };
+    }
+    savedHighValueCards = (payload.data || [])
       .filter(card => Number(card.priceUsd) >= 100)
       .sort((left, right) => Number(right.priceUsd) - Number(left.priceUsd));
     renderHighValueTable();
