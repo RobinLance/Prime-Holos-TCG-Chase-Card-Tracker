@@ -525,8 +525,8 @@ http.createServer(async (req, res) => {
   let requested;
   if (url.pathname === '/') {
     const files = fs.readdirSync(process.cwd());
-    const indexFile = files.find(f => /^index.*\.html$/i.test(f))
-      || files.find(f => /^prime\s+holos/i.test(f) && f.endsWith('.html'))
+    const indexFile = files.find(f => /^prime\s+holos/i.test(f) && f.endsWith('.html'))
+      || files.find(f => /^index.*\.html$/i.test(f))
       || files.find(f => f.endsWith('.html') && f !== 'server.js');
     requested = indexFile ? '/' + indexFile : '/';
   } else {
