@@ -9,10 +9,29 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const { URL } = require('url');
+const { JustTCG } = require('justtcg-js');
+
+const envPath = path.join(process.cwd(), '.env');
+if (fs.existsSync(envPath)) {
+  fs.readFileSync(envPath, 'utf8').split(/\r?\n/).forEach(line => {
+    const match = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*?)\s*$/);
+    if (match && !process.env[match[1]]) process.env[match[1]] = match[2].replace(/^['"]|['"]$/g, '');
+  });
+}
 
 const port = Number(process.env.PORT || 8000);
 const clientId = process.env.TCGPLAYER_PUBLIC_KEY;
 const clientSecret = process.env.TCGPLAYER_PRIVATE_KEY;
+const googleVisionApiKey = process.env.GOOGLE_VISION_API_KEY;
+const ximilarApiToken = process.env.XIMILAR_API_TOKEN;
+const justTcgApiKey = process.env.JUSTTCG_API_KEY;
+const cardsightApiKey = process.env.CARDSIGHTAI_API_KEY;
+const pokePriceTrackerApiKey = process.env.POKEPRICE_TRACKER_API_KEY;
+const ximilarApiBase = 'https://api.ximilar.com/account';
+const justTcg = new JustTCG({ apiKey: justTcgApiKey });
+const chaseCardsPath = path.join(process.cwd(), 'chase-cards.json');
+let chaseCardsCache = null;
+let chaseCardsCacheKey = '';
 let token = null;
 let tokenExpiresAt = 0;
 let usdPhpRate = null;
@@ -61,14 +80,20 @@ function findChaseCards(query, game) {
 }
 
 function chaseCardsForLookup() {
-  try { return JSON.parse(fs.readFileSync(path.join(process.cwd(), 'chase-cards.json'), 'utf8')); }
-  catch { return []; }
+  try {
+    const stats = fs.statSync(chaseCardsPath);
+    const cacheKey = stats.mtimeMs + ':' + stats.size;
+    if (chaseCardsCache && chaseCardsCacheKey === cacheKey) return chaseCardsCache;
+    chaseCardsCache = JSON.parse(fs.readFileSync(chaseCardsPath, 'utf8'));
+    chaseCardsCacheKey = cacheKey;
+    return chaseCardsCache;
+  } catch { return []; }
 }
 
-function readRequestBody(req) {
+function readRequestBody(req, maxBytes = 100000) {
   return new Promise((resolve, reject) => {
     let body = '';
-    req.on('data', chunk => { body += chunk; if (body.length > 100000) reject(new Error('Request is too large.')); });
+    req.on('data', chunk => { body += chunk; if (body.length > maxBytes) reject(new Error('Request is too large.')); });
     req.on('end', () => resolve(body));
     req.on('error', reject);
   });
@@ -117,16 +142,212 @@ async function tcgplayerSearch(query, categoryId) {
   }));
 }
 
-async function getUsdPhpRate() {
-  if (usdPhpRate && Date.now() < usdPhpRateExpiresAt) return usdPhpRate;
-  const response = await fetch('https://open.er-api.com/v6/latest/USD');
+async function justTcgGames() {
+  if (!justTcgApiKey) throw new Error('Set JUSTTCG_API_KEY before using JustTCG.');
+  return (await justTcg.v1.games.list()).data;
+}
+
+async function justTcgSearch(query, game) {
+  if (!justTcgApiKey) throw new Error('Set JUSTTCG_API_KEY before using JustTCG.');
+  return (await justTcg.v1.cards.search(query, { game, limit: 12 })).data;
+}
+
+async function pokePriceTrackerSearch(query) {
+  if (!pokePriceTrackerApiKey) throw new Error('Set POKEPRICE_TRACKER_API_KEY before using PokePriceTracker.');
+  const searchUrl = new URL('https://www.pokemonpricetracker.com/api/v2/cards');
+  searchUrl.searchParams.set('search', query);
+  searchUrl.searchParams.set('limit', '12');
+  const response = await fetch(searchUrl, {
+    headers: { accept: 'application/json', authorization: 'Bearer ' + pokePriceTrackerApiKey }
+  });
+  const text = await response.text();
+  let payload;
+  try { payload = text ? JSON.parse(text) : null; } catch { payload = null; }
+  if (!response.ok) {
+    const detail = payload?.error ? ': ' + payload.error : '';
+    throw new Error('PokePriceTracker returned ' + response.status + detail);
+  }
+  return Array.isArray(payload?.data) ? payload.data : [];
+}
+
+async function identifyWithCardSight(image) {
+  if (!cardsightApiKey) throw new Error('Set CARDSIGHTAI_API_KEY before using CardSight AI.');
+  const match = image.match(/^data:([^;]+);base64,(.+)$/);
+  if (!match) throw new Error('A valid card image is required.');
+  const form = new FormData();
+  form.append('image', new Blob([Buffer.from(match[2], 'base64')], { type: match[1] }), 'card.png');
+  const response = await fetch('https://api.cardsight.ai/v1/identify/card', {
+    method: 'POST',
+    headers: { 'X-API-Key': cardsightApiKey },
+    body: form
+  });
+  const text = await response.text();
+  let data;
+  try { data = text ? JSON.parse(text) : null; } catch { data = null; }
+  if (!response.ok) throw new Error('CardSight AI returned ' + response.status + (text ? ': ' + text.slice(0, 300) : '.'));
+  if (!data) throw new Error('CardSight AI returned an empty identification result.');
+  return data;
+}
+
+async function getExchangeRate(fromCurrency) {
+  const currency = String(fromCurrency || '').toUpperCase();
+  if (!/^[A-Z]{3}$/.test(currency)) throw new Error('A valid three-letter source currency is required.');
+  if (currency === 'USD' && usdPhpRate && Date.now() < usdPhpRateExpiresAt) return usdPhpRate;
+  const response = await fetch('https://open.er-api.com/v6/latest/' + encodeURIComponent(currency));
   if (!response.ok) throw new Error('Exchange-rate service returned ' + response.status);
   const data = await response.json();
   const rate = Number(data.rates?.PHP);
-  if (!Number.isFinite(rate) || rate <= 0) throw new Error('USD/PHP exchange rate is unavailable.');
-  usdPhpRate = rate;
-  usdPhpRateExpiresAt = Date.now() + 6 * 60 * 60 * 1000;
+  if (!Number.isFinite(rate) || rate <= 0) throw new Error(currency + '/PHP exchange rate is unavailable.');
+  if (currency === 'USD') {
+    usdPhpRate = rate;
+    usdPhpRateExpiresAt = Date.now() + 6 * 60 * 60 * 1000;
+  }
   return rate;
+}
+
+async function submitXimilarGrade(image) {
+  if (!ximilarApiToken) throw new Error('Set XIMILAR_API_TOKEN before using card grading.');
+  const response = await fetch(ximilarApiBase + '/v2/request/', {
+    method: 'POST',
+    headers: { authorization: 'Token ' + ximilarApiToken, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      type: 'card-grader',
+      endpoint: 'grade',
+      records: [{ _base64: image.replace(/^data:[^;]+;base64,/, '') }]
+    })
+  });
+  const text = await response.text();
+  let data;
+  try { data = text ? JSON.parse(text) : null; } catch { data = null; }
+  if (!response.ok) throw new Error('Ximilar grading submission returned ' + response.status + (text ? ': ' + text.slice(0, 300) : '.'));
+  if (!data) throw new Error('Ximilar returned an empty grading result.');
+  return data;
+}
+
+async function getXimilarGrade(id) {
+  if (!ximilarApiToken) throw new Error('Set XIMILAR_API_TOKEN before using card grading.');
+  const response = await fetch(ximilarApiBase + '/v2/request/' + encodeURIComponent(id), {
+    headers: { authorization: 'Token ' + ximilarApiToken }
+  });
+  const text = await response.text();
+  let data;
+  try { data = text ? JSON.parse(text) : null; } catch { data = null; }
+  if (!response.ok) throw new Error('Ximilar grading status returned ' + response.status + (text ? ': ' + text.slice(0, 300) : '.'));
+  if (!data) throw new Error('Ximilar returned an empty grading status.');
+  return data;
+}
+
+async function googleVisionOcr(imageBase64) {
+  if (!googleVisionApiKey) throw new Error('Set GOOGLE_VISION_API_KEY environment variable.');
+  const url = new URL('https://vision.googleapis.com/v1/images:annotate');
+  url.searchParams.set('key', googleVisionApiKey);
+  const requestBody = {
+    requests: [
+      {
+        image: { content: imageBase64 },
+        features: [
+          { type: 'TEXT_DETECTION', maxResults: 5 },
+          { type: 'DOCUMENT_TEXT_DETECTION', maxResults: 5 }
+        ]
+      }
+    ]
+  };
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(requestBody)
+  });
+  if (!response.ok) {
+    const errData = await response.text();
+    throw new Error('Google Vision returned ' + response.status + ': ' + errData);
+  }
+  const result = await response.json();
+  const textAnnotation = result.responses?.[0]?.textAnnotation;
+  if (!textAnnotation) return { text: '', blocks: [] };
+  
+  // Extract text and blocks with bounding boxes
+  const fullText = textAnnotation.text || '';
+  const blocks = textAnnotation.pages?.[0]?.blocks || [];
+  
+  // Process each block to find text segments with bounding boxes
+  const textBlocks = [];
+  for (const block of blocks) {
+    const blockText = block.text || '';
+    const vertices = block.boundingBox?.vertices || [];
+    if (blockText.length >= 3 && vertices.length >= 4) {
+      // Calculate center and dimensions
+      const xs = vertices.map(v => v.x);
+      const ys = vertices.map(v => v.y);
+      const centerX = (xs.reduce((a, b) => a + b, 0) / xs.length);
+      const centerY = (ys.reduce((a, b) => a + b, 0) / ys.length);
+      const width = Math.max(...xs) - Math.min(...xs);
+      const height = Math.max(...ys) - Math.min(...ys);
+      const area = width * height;
+      
+      // Filter: card-like sizes (aspect ratio ~2:3, area thresholds)
+      // TCG cards are approximately 63.5mm x 88.9mm = ratio ~0.71
+      const aspectRatio = width / height;
+      const isCardLike = aspectRatio > 0.5 && aspectRatio < 1.5 && area > 500 && area < 50000;
+      
+      textBlocks.push({
+        text: blockText,
+        centerX,
+        centerY,
+        width,
+        height,
+        area,
+        aspectRatio,
+        isCardLike
+      });
+    }
+  }
+  
+  // Sort by area (largest first) and pick the most likely card region
+  textBlocks.sort((a, b) => b.area - a.area);
+  
+  // Find the best card-like block, or fall back to largest text block
+  let bestBlock = textBlocks.find(b => b.isCardLike);
+  if (!bestBlock && textBlocks.length > 0) {
+    bestBlock = textBlocks[0];
+  }
+  
+  return {
+    text: fullText,
+    bestBlock,
+    allBlocks: textBlocks,
+    cardRegion: bestBlock ? {
+      x: bestBlock.centerX - bestBlock.width / 2,
+      y: bestBlock.centerY - bestBlock.height / 2,
+      width: bestBlock.width,
+      height: bestBlock.height
+    } : null
+  };
+}
+
+function base64ToImage(base64) {
+  const decoded = Buffer.from(base64, 'base64');
+  return decoded;
+}
+
+async function ocrCroppedImage(imageBase64, cropX, cropY, cropW, cropH) {
+  try {
+    const decoded = base64ToImage(imageBase64);
+    const image = await Jimp.read(decoded);
+    // Crop to the card region
+    const cropped = image.crop(cropX, cropY, cropW, cropH);
+    // Resize for better OCR, convert to grayscale, add contrast
+    const resized = cropped.resize(1200, Jimp.AUTO);
+    // Invert if needed and threshold
+    const gray = resized.greyscale();
+    const thresholded = gray.threshold(128);
+    // Run Tesseract (we need to check if tesseract is available, but for now return empty)
+    // In a full implementation, would call tesseract.js on the buffer
+    // For now return the base64 of the processed image
+    return thresholded.base64;
+  } catch (e) {
+    console.log('Cropped OCR error:', e.message);
+    return '';
+  }
 }
 
 async function handleApi(req, res, url) {
@@ -191,8 +412,86 @@ async function handleApi(req, res, url) {
     } catch (error) { return sendJson(res, 400, { error: 'Invalid chase card: ' + error.message }); }
   }
   if (url.pathname === '/api/exchange/usd-php') {
-    try { return sendJson(res, 200, { base: 'USD', target: 'PHP', rate: await getUsdPhpRate() }); }
+    try { return sendJson(res, 200, { base: 'USD', target: 'PHP', rate: await getExchangeRate('USD') }); }
     catch (error) { return sendJson(res, 502, { error: error.message }); }
+  }
+  if (url.pathname.startsWith('/api/exchange/') && url.pathname.endsWith('-php')) {
+    const sourceCurrency = url.pathname.slice('/api/exchange/'.length, -'-php'.length).toUpperCase();
+    try { return sendJson(res, 200, { base: sourceCurrency, target: 'PHP', rate: await getExchangeRate(sourceCurrency) }); }
+    catch (error) { return sendJson(res, 502, { error: error.message }); }
+  }
+  if (url.pathname === '/api/card-grade' && req.method === 'POST') {
+    try {
+      const body = JSON.parse(await readRequestBody(req, 15 * 1024 * 1024));
+      if (typeof body.image !== 'string' || !body.image.startsWith('data:image/')) {
+        return sendJson(res, 400, { error: 'A captured or uploaded image is required.' });
+      }
+      return sendJson(res, 202, await submitXimilarGrade(body.image));
+    } catch (error) {
+      return sendJson(res, 502, { error: error.message });
+    }
+  }
+  if (url.pathname.startsWith('/api/card-grade/') && req.method === 'GET') {
+    try {
+      const id = url.pathname.slice('/api/card-grade/'.length);
+      if (!id) return sendJson(res, 400, { error: 'A grading request id is required.' });
+      return sendJson(res, 200, await getXimilarGrade(id));
+    } catch (error) {
+      return sendJson(res, 502, { error: error.message });
+    }
+  }
+  if (url.pathname === '/api/justtcg/games' && req.method === 'GET') {
+    try {
+      return sendJson(res, 200, { data: await justTcgGames() });
+    } catch (error) {
+      return sendJson(res, 502, { error: error.message });
+    }
+  }
+  if (url.pathname === '/api/justtcg/search' && req.method === 'GET') {
+    const query = url.searchParams.get('q')?.trim();
+    const game = url.searchParams.get('game')?.trim();
+    if (!query || !game) return sendJson(res, 400, { error: 'q and game are required' });
+    try {
+      return sendJson(res, 200, { data: await justTcgSearch(query, game) });
+    } catch (error) {
+      return sendJson(res, 502, { error: error.message });
+    }
+  }
+  if (url.pathname === '/api/pokeprice/search' && req.method === 'GET') {
+    const query = url.searchParams.get('q')?.trim();
+    if (!query) return sendJson(res, 400, { error: 'q is required' });
+    try {
+      return sendJson(res, 200, { data: await pokePriceTrackerSearch(query) });
+    } catch (error) {
+      return sendJson(res, 502, { error: error.message });
+    }
+  }
+  if (url.pathname === '/api/cardsight/identify' && req.method === 'POST') {
+    try {
+      const body = JSON.parse(await readRequestBody(req, 15 * 1024 * 1024));
+      if (typeof body.image !== 'string' || !body.image.startsWith('data:image/')) {
+        return sendJson(res, 400, { error: 'A captured or uploaded image is required.' });
+      }
+      return sendJson(res, 200, { data: await identifyWithCardSight(body.image) });
+    } catch (error) {
+      return sendJson(res, 502, { error: error.message });
+    }
+  }
+  if (url.pathname === '/api/ocr' && req.method === 'POST') {
+    try {
+      const body = await readRequestBody(req, 15 * 1024 * 1024);
+      const result = await googleVisionOcr(body);
+      return sendJson(res, 200, {
+        data: {
+          text: result.text,
+          bestBlock: result.bestBlock,
+          cardRegion: result.cardRegion,
+          allBlocks: result.allBlocks
+        }
+      });
+    } catch (error) {
+      return sendJson(res, 502, { error: error.message });
+    }
   }
   if (url.pathname !== '/api/tcgplayer/search') return false;
   const query = url.searchParams.get('q')?.trim();
@@ -208,11 +507,33 @@ async function handleApi(req, res, url) {
 http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
   if (await handleApi(req, res, url)) return;
-  const requested = url.pathname === '/' ? '/index (2).html' : decodeURIComponent(url.pathname);
+  let requested;
+  if (url.pathname === '/') {
+    const files = fs.readdirSync(process.cwd());
+    const indexFile = files.find(f => /^index.*\.html$/i.test(f))
+      || files.find(f => /^prime\s+holos/i.test(f) && f.endsWith('.html'))
+      || files.find(f => f.endsWith('.html') && f !== 'server.js');
+    requested = indexFile ? '/' + indexFile : '/';
+  } else {
+    requested = decodeURIComponent(url.pathname);
+  }
   const filePath = path.join(process.cwd(), requested);
   if (!filePath.startsWith(process.cwd()) || !fs.existsSync(filePath)) {
     res.writeHead(404); res.end('Not found'); return;
   }
-  res.writeHead(200, { 'content-type': filePath.endsWith('.html') ? 'text/html; charset=utf-8' : 'application/octet-stream' });
+  const ext = path.extname(filePath).toLowerCase();
+  const mimeTypes = {
+    '.html': 'text/html; charset=utf-8',
+    '.css': 'text/css; charset=utf-8',
+    '.js': 'application/javascript; charset=utf-8',
+    '.json': 'application/json; charset=utf-8',
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.webp': 'image/webp',
+    '.svg': 'image/svg+xml'
+  };
+  const contentType = mimeTypes[ext] || 'application/octet-stream';
+  res.writeHead(200, { 'content-type': contentType, 'cache-control': 'no-cache' });
   fs.createReadStream(filePath).pipe(res);
 }).listen(port, () => console.log('Slabcheck running at http://localhost:' + port));
