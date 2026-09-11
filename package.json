@@ -3,7 +3,7 @@
   "homepage": "https://robinlance.github.io/Prime-Holos-TCG-Chase-Card-Tracker",
   "scripts": {
     "start": "node server.js",
-    "build": "node -e \"const fs=require('fs'); fs.rmSync('dist',{recursive:true,force:true}); fs.mkdirSync('dist/assets',{recursive:true}); fs.copyFileSync('Prime Holos - TCG Chase Card Tracker.html','dist/index.html'); fs.copyFileSync('styles.css','dist/styles.css'); fs.copyFileSync('chase-cards.json','dist/chase-cards.json'); fs.cpSync('assets','dist/assets',{recursive:true})\"",
+    "build": "node -e \"const fs=require('fs'); fs.rmSync('dist',{recursive:true,force:true}); fs.mkdirSync('dist/assets',{recursive:true}); fs.copyFileSync('index.html','dist/index.html'); fs.copyFileSync('styles.css','dist/styles.css'); fs.copyFileSync('chase-cards.json','dist/chase-cards.json'); fs.cpSync('assets','dist/assets',{recursive:true})\"",
     "predeploy": "npm run build",
     "deploy": "gh-pages -d dist"
   },
