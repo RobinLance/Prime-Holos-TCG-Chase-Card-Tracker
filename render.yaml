@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: prime-holos-api
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: FRONTEND_ORIGIN
+        sync: false
+      - key: TCGPLAYER_PUBLIC_KEY
+        sync: false
+      - key: TCGPLAYER_PRIVATE_KEY
+        sync: false
+      - key: GOOGLE_VISION_API_KEY
+        sync: false
+      - key: XIMILAR_API_TOKEN
+        sync: false
+      - key: JUSTTCG_API_KEY
+        sync: false
+      - key: CARDSIGHTAI_API_KEY
+        sync: false
+      - key: POKEPRICE_TRACKER_API_KEY
+        sync: false

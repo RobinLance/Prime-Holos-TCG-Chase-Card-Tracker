@@ -351,6 +351,9 @@ async function ocrCroppedImage(imageBase64, cropX, cropY, cropW, cropH) {
 }
 
 async function handleApi(req, res, url) {
+  if (url.pathname === '/api/health' && req.method === 'GET') {
+    return sendJson(res, 200, { ok: true });
+  }
   if (url.pathname === '/api/chase-cards') {
     if (req.method === 'POST') {
       try {
@@ -506,6 +509,18 @@ async function handleApi(req, res, url) {
 
 http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
+  const allowedOrigin = process.env.FRONTEND_ORIGIN || '*';
+  if (req.headers.origin && (allowedOrigin === '*' || req.headers.origin === allowedOrigin)) {
+    res.setHeader('access-control-allow-origin', req.headers.origin);
+    res.setHeader('vary', 'Origin');
+  }
+  if (req.method === 'OPTIONS') {
+    res.setHeader('access-control-allow-methods', 'GET,POST,PUT,OPTIONS');
+    res.setHeader('access-control-allow-headers', 'content-type');
+    res.writeHead(204);
+    res.end();
+    return;
+  }
   if (await handleApi(req, res, url)) return;
   let requested;
   if (url.pathname === '/') {
