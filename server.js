@@ -510,6 +510,7 @@ async function handleApi(req, res, url) {
 http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
   const allowedOrigin = process.env.FRONTEND_ORIGIN || 'https://robinlance.github.io';
+  const staticRoot = fs.existsSync(path.join(process.cwd(), 'dist')) ? path.join(process.cwd(), 'dist') : process.cwd();
   if (req.headers.origin && (allowedOrigin === '*' || req.headers.origin === allowedOrigin)) {
     res.setHeader('access-control-allow-origin', req.headers.origin);
     res.setHeader('vary', 'Origin');
@@ -524,16 +525,12 @@ http.createServer(async (req, res) => {
   if (await handleApi(req, res, url)) return;
   let requested;
   if (url.pathname === '/') {
-    const files = fs.readdirSync(process.cwd());
-    const indexFile = files.find(f => /^prime\s+holos/i.test(f) && f.endsWith('.html'))
-      || files.find(f => /^index.*\.html$/i.test(f))
-      || files.find(f => f.endsWith('.html') && f !== 'server.js');
-    requested = indexFile ? '/' + indexFile : '/';
+    requested = '/index.html';
   } else {
     requested = decodeURIComponent(url.pathname);
   }
-  const filePath = path.join(process.cwd(), requested);
-  if (!filePath.startsWith(process.cwd()) || !fs.existsSync(filePath)) {
+  const filePath = path.join(staticRoot, requested);
+  if (!filePath.startsWith(staticRoot) || !fs.existsSync(filePath)) {
     res.writeHead(404); res.end('Not found'); return;
   }
   const ext = path.extname(filePath).toLowerCase();
