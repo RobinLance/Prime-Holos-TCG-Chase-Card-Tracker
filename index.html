@@ -44,6 +44,7 @@
       <div class="camera-wrap">
         <video id="video" autoplay playsinline muted></video>
         <div class="frame-guide"></div>
+        <div class="card-outline" id="cardOutline"></div>
       </div>
       <canvas id="canvas" style="display:none;"></canvas>
       <div class="controls">
@@ -170,11 +171,15 @@ const imageViewerImg = document.getElementById('imageViewerImg');
 const imageViewerClose = document.getElementById('imageViewerClose');
 const gameSwitch = document.getElementById('gameSwitch');
 const sourceTag = document.getElementById('sourceTag');
+const cardOutline = document.getElementById('cardOutline');
+let outlineTimer = null;
+const outlineCanvas = document.createElement('canvas');
 let stream = null;
 let currentImageHash = '';
 let currentImageDataUrl = '';
 let gradeRequest = 0;
 let chaseImageHash = '';
+let ocrSourceCanvas = null;   // auto-cropped card frame used for OCR
 
 if (location.protocol === 'file:') {
   camStatus.textContent = 'Camera needs a localhost page. Run this folder with a local server, then open http://localhost:8000.';
@@ -221,8 +226,13 @@ loadHighValueCards();
 
 async function loadHighValueCards() {
   try {
-    const response = await fetch('/api/chase-cards?search=');
-    savedHighValueCards = ((await response.json()).data || [])
+    let response = await fetch('/api/chase-cards?search=');
+    let payload = response.ok ? await response.json() : null;
+    if (!payload) {
+      response = await fetch('chase-cards.json');
+      payload = { data: response.ok ? await response.json() : [] };
+    }
+    savedHighValueCards = (payload.data || [])
       .filter(card => Number(card.priceUsd) >= 100)
       .sort((left, right) => Number(right.priceUsd) - Number(left.priceUsd));
     renderHighValueTable();
@@ -410,7 +420,8 @@ startCam.addEventListener('click', async () => {
     await video.play();
     shootBtn.disabled = false;
     startCam.textContent = 'Restart camera';
-    camStatus.textContent = 'Camera live. Fill most of the frame with the card and hit Capture.';
+    startCardDetection();
+    camStatus.textContent = 'Camera live. Just point it at a card — it auto-detects and zooms onto the card when you capture.';
   } catch (err) {
     shootBtn.disabled = true;
     const reason = err.name === 'NotAllowedError'
@@ -448,16 +459,22 @@ fileInput.addEventListener('change', (e) => {
 });
 
 function useImageFromCanvas() {
-  const dataUrl = canvas.toDataURL('image/png');
+  // Auto-detect the card and crop/zoom onto it so the user doesn't have to be precise.
+  const box = detectCardBox(canvas);
+  ocrSourceCanvas = cropToBox(canvas, box);
+  const dataUrl = ocrSourceCanvas.toDataURL('image/png');
   currentImageDataUrl = dataUrl;
   shotPreview.src = dataUrl;
   shotPreview.style.display = 'block';
   noShotYet.style.display = 'none';
-  currentImageHash = createImageHash(canvas);
+  currentImageHash = createImageHash(ocrSourceCanvas);
   lookupBtn.disabled = !nameField.value.trim() && !currentImageHash;
   gradeBtn.disabled = false;
   gradeResult.hidden = true;
   gradeResult.textContent = '';
+  camStatus.textContent = box
+    ? 'Card detected — auto-cropped and zoomed for reading.'
+    : 'Captured. Could not isolate the card, using the full frame.';
   runOCR();
 }
 
@@ -479,9 +496,146 @@ function createImageHash(source) {
   return grayscale.map(value => value >= average ? '1' : '0').join('');
 }
 
-function makeOcrImage(startRatio, heightRatio) {
-  const sourceWidth = canvas.width;
-  const sourceHeight = canvas.height;
+// ---------------------------------------------------------------------------
+// Auto card detection: find the card rectangle in the captured frame and return
+// a tight bounding box, so capture can auto-scale/zoom onto the card instead of
+// making the user line it up precisely.
+// ---------------------------------------------------------------------------
+function detectCardBox(sourceCanvas) {
+  const width = sourceCanvas.width;
+  const height = sourceCanvas.height;
+  if (!width || !height) return null;
+  // Work on a small copy for speed.
+  const scale = Math.min(1, 320 / Math.max(width, height));
+  const w = Math.max(1, Math.round(width * scale));
+  const h = Math.max(1, Math.round(height * scale));
+  const small = document.createElement('canvas');
+  small.width = w;
+  small.height = h;
+  const ctx = small.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(sourceCanvas, 0, 0, w, h);
+  const px = ctx.getImageData(0, 0, w, h).data;
+
+  // Grayscale + overall mean brightness.
+  const gray = new Float32Array(w * h);
+  let sum = 0;
+  for (let i = 0; i < gray.length; i++) {
+    const p = i * 4;
+    gray[i] = px[p] * 0.299 + px[p + 1] * 0.587 + px[p + 2] * 0.114;
+    sum += gray[i];
+  }
+  const mean = sum / gray.length;
+  const threshold = Math.max(70, mean * 0.85); // card is usually brighter than its background
+
+  // Column/row occupancy of "card-like" (bright) pixels.
+  const colFrac = new Float32Array(w);
+  const rowFrac = new Float32Array(h);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (gray[y * w + x] >= threshold) {
+        colFrac[x]++;
+        rowFrac[y]++;
+      }
+    }
+  }
+  for (let x = 0; x < w; x++) colFrac[x] /= h;
+  for (let y = 0; y < h; y++) rowFrac[y] /= w;
+
+  // Find the largest contiguous run of columns/rows where >40% of pixels are card-like.
+  const span = (fracs, minFrac) => {
+    let bestStart = -1, bestEnd = -1, runStart = -1;
+    for (let i = 0; i < fracs.length; i++) {
+      const on = fracs[i] >= minFrac;
+      if (on && runStart < 0) runStart = i;
+      if ((!on || i === fracs.length - 1) && runStart >= 0) {
+        const runEnd = on ? i : i - 1;
+        if (runEnd - runStart > bestEnd - bestStart) { bestStart = runStart; bestEnd = runEnd; }
+        runStart = -1;
+      }
+    }
+    return bestStart >= 0 ? [bestStart, bestEnd] : null;
+  };
+  const cols = span(colFrac, 0.4);
+  const rows = span(rowFrac, 0.4);
+  if (!cols || !rows) return null;
+
+  // Convert back to full-resolution pixels, then verify it looks like a card
+  // (a portrait rectangle occupying a reasonable chunk of the frame).
+  const left = Math.round((cols[0] / w) * width);
+  const right = Math.round(((cols[1] + 1) / w) * width);
+  const top = Math.round((rows[0] / h) * height);
+  const bottom = Math.round(((rows[1] + 1) / h) * height);
+  const boxW = right - left;
+  const boxH = bottom - top;
+  const areaFrac = (boxW * boxH) / (width * height);
+  const aspect = boxH / boxW;
+  if (areaFrac < 0.12 || areaFrac > 0.98) return null;   // too small / basically whole frame
+  if (aspect < 0.9 || aspect > 2.4) return null;          // not portrait-card shaped
+  return { left, top, width: boxW, height: boxH };
+}
+
+// Draw the source onto a new canvas cropped to `box`, with a little padding,
+// scaled up to a comfortable OCR resolution. Falls back to the full frame.
+function cropToBox(sourceCanvas, box, padRatio = 0.04) {
+  const out = document.createElement('canvas');
+  if (!box) {
+    out.width = sourceCanvas.width;
+    out.height = sourceCanvas.height;
+    out.getContext('2d', { alpha: false }).drawImage(sourceCanvas, 0, 0);
+    return out;
+  }
+  const padX = box.width * padRatio;
+  const padY = box.height * padRatio;
+  const sx = Math.max(0, box.left - padX);
+  const sy = Math.max(0, box.top - padY);
+  const sw = Math.min(sourceCanvas.width - sx, box.width + padX * 2);
+  const sh = Math.min(sourceCanvas.height - sy, box.height + padY * 2);
+  const targetW = Math.min(1600, Math.max(700, sw));
+  out.width = Math.round(targetW);
+  out.height = Math.round(targetW * (sh / sw));
+  const ctx = out.getContext('2d', { alpha: false });
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(sourceCanvas, sx, sy, sw, sh, 0, 0, out.width, out.height);
+  return out;
+}
+
+// Live overlay: sample the video a few times a second, detect the card, and draw
+// an outline around it in the preview so the user gets instant feedback.
+function startCardDetection() {
+  stopCardDetection();
+  outlineTimer = setInterval(() => {
+    if (!video.videoWidth || !video.videoHeight) return;
+    const w = 240;
+    const h = Math.max(1, Math.round(w * video.videoHeight / video.videoWidth));
+    outlineCanvas.width = w;
+    outlineCanvas.height = h;
+    const ctx = outlineCanvas.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(video, 0, 0, w, h);
+    const box = detectCardBox(outlineCanvas);
+    if (!box) { cardOutline.classList.remove('on'); return; }
+    const rect = video.getBoundingClientRect();
+    const wrap = cardOutline.parentElement.getBoundingClientRect();
+    const offsetX = rect.left - wrap.left;
+    const offsetY = rect.top - wrap.top;
+    const sx = rect.width / video.videoWidth;
+    const sy = rect.height / video.videoHeight;
+    cardOutline.style.left = (offsetX + box.left * sx) + 'px';
+    cardOutline.style.top = (offsetY + box.top * sy) + 'px';
+    cardOutline.style.width = (box.width * sx) + 'px';
+    cardOutline.style.height = (box.height * sy) + 'px';
+    cardOutline.classList.add('on');
+  }, 300);
+}
+function stopCardDetection() {
+  if (outlineTimer) { clearInterval(outlineTimer); outlineTimer = null; }
+  cardOutline.classList.remove('on');
+}
+
+function makeOcrImage(startRatio, heightRatio, sourceCanvas) {
+  const source = sourceCanvas || canvas;
+  const sourceWidth = source.width;
+  const sourceHeight = source.height;
   const startY = Math.floor(sourceHeight * startRatio);
   const cropHeight = Math.max(1, Math.floor(sourceHeight * heightRatio));
   const ocrCanvas = document.createElement('canvas');
@@ -490,7 +644,7 @@ function makeOcrImage(startRatio, heightRatio) {
   const context = ocrCanvas.getContext('2d', { willReadFrequently: true });
   context.imageSmoothingEnabled = true;
   context.imageSmoothingQuality = 'high';
-  context.drawImage(canvas, 0, startY, sourceWidth, cropHeight, 0, 0, ocrCanvas.width, ocrCanvas.height);
+  context.drawImage(source, 0, startY, sourceWidth, cropHeight, 0, 0, ocrCanvas.width, ocrCanvas.height);
   const w = ocrCanvas.width;
   const h = ocrCanvas.height;
   const imageData = context.getImageData(0, 0, w, h);
@@ -658,10 +812,10 @@ async function runOCR() {
     });
     // Multiple title crop regions to catch names at different vertical positions
     const titleCrops = [
-      makeOcrImage(0, 0.20),   // top 20%
-      makeOcrImage(0.05, 0.20), // 5-25%
-      makeOcrImage(0.10, 0.20), // 10-30%
-      makeOcrImage(0, 0.25),    // original 30% fallback
+      makeOcrImage(0, 0.20, ocrSourceCanvas),   // top 20%
+      makeOcrImage(0.05, 0.20, ocrSourceCanvas), // 5-25%
+      makeOcrImage(0.10, 0.20, ocrSourceCanvas), // 10-30%
+      makeOcrImage(0, 0.25, ocrSourceCanvas),    // original 30% fallback
     ];
     for (const crop of titleCrops) {
       const result = await Tesseract.recognize(crop, 'eng', titleOptions);
@@ -679,7 +833,7 @@ async function runOCR() {
       }
     }
     // Also try full card but with PSM 11 (sparse text) to avoid reading whole card
-    const fullResult = await Tesseract.recognize(makeOcrImage(0, 1), 'eng', { ...blockOptions, tessedit_pageseg_mode: '11' });
+    const fullResult = await Tesseract.recognize(makeOcrImage(0, 1, ocrSourceCanvas), 'eng', { ...blockOptions, tessedit_pageseg_mode: '11' });
     const fullGuesses = extractGuesses(fullResult.data.text);
     for (const g of fullGuesses) {
       if (!allGuesses.some(e => e.toLowerCase() === g.toLowerCase()) && isLikelyCardName(g)) {
@@ -866,6 +1020,7 @@ function renderGradeResult(response) {
 }
 
 window.addEventListener('beforeunload', () => {
+  stopCardDetection();
   if (stream) stream.getTracks().forEach(track => track.stop());
 });
 
@@ -915,16 +1070,27 @@ async function searchCards(name, automatic, guesses) {
     }));
     const merged = new Map();
     const searchNames = queries.length ? queries : (name ? [name] : []);
-    responses.flat().filter(tile => !name || searchNames.some(query => nameMatchScore(query, tile.name) >= 50)).forEach(tile => {
-      if (!tile.thumb) {
-        const artworkMatch = responses.flat().find(candidate => candidate.thumb && nameMatchScore(tile.name, candidate.name) === 100);
-        if (artworkMatch) tile.thumb = artworkMatch.thumb;
-      }
-      const key = tile.id || tile.name.toLowerCase() + '|' + tile.subtitle;
-      const existing = merged.get(key);
-      if (!existing || tile.score > existing.score) merged.set(key, tile);
-    });
+    // The confirmed/user-typed `name` is authoritative: a card must relate to it.
+    // Extra OCR guesses are used only to broaden the API queries, never to admit
+    // an unrelated card that doesn't also relate to the primary name.
+    const primaryNames = name ? [name] : searchNames;
+    responses.flat()
+      // Keep only cards whose name is genuinely related to what was searched. The old
+      // "score >= 50" gate let unrelated cards through (e.g. "Seel" for a "Darkrai"
+      // search) because the fuzzy score is a loose similarity, not a real match.
+      .filter(tile => isRelevantMatch(tile.name, primaryNames))
+      .forEach(tile => {
+        if (!tile.thumb) {
+          const artworkMatch = responses.flat().find(candidate => candidate.thumb && nameMatchScore(tile.name, candidate.name) === 100);
+          if (artworkMatch) tile.thumb = artworkMatch.thumb;
+        }
+        const key = tile.id || tile.name.toLowerCase() + '|' + tile.subtitle;
+        const existing = merged.get(key);
+        if (!existing || tile.score > existing.score) merged.set(key, tile);
+      });
     const matches = Array.from(merged.values()).filter(tile => tile.thumb);
+    // Show best (most relevant) matches first so unrelated stragglers sink to the bottom.
+    matches.sort((left, right) => (right.score || 0) - (left.score || 0));
     renderTiles(matches);
     addLiveHighValueCards(matches);
     highValueSection.style.display = 'block';
@@ -1034,6 +1200,46 @@ function nameMatchScore(query, candidate) {
     }
   }
   return Math.max(1, Math.round((1 - previous[right.length] / Math.max(left.length, right.length)) * 100));
+}
+
+// Decide whether a card name is actually a match for the thing the user searched,
+// rather than just vaguely similar. This is what stops junk like "Seel" showing up
+// for a "Darkrai" search. A tile passes only if its name:
+//   - exactly equals a query, or
+//   - starts with a query, or
+//   - contains a query as a whole word, or
+//   - shares a significant prefix / minor spelling of a query.
+function isRelevantMatch(candidateName, queries) {
+  const cand = normalizeName(candidateName);
+  if (!cand) return false;
+  const candWords = cand.split(' ').filter(Boolean);
+  return (queries || []).some(rawQuery => {
+    const query = normalizeName(rawQuery);
+    if (!query) return false;
+    if (cand === query) return true;
+    // Candidate starts with query (covers "darkrai" -> "darkrai ex", "darkrai vstar").
+    if (cand.startsWith(query)) return true;
+    // Query starts with candidate but candidate isn't a tiny fragment.
+    if (cand.length >= 4 && query.startsWith(cand)) return true;
+    // Query appears as a whole word inside the candidate name.
+    if (candWords.includes(query)) return true;
+    // Significant shared prefix: most of the query must be a prefix of the candidate.
+    if (query.length >= 5 && cand.startsWith(query.slice(0, Math.max(4, query.length - 2)))) return true;
+    // Near-exact spelling (small edit distance relative to length) to absorb OCR typos.
+    if (query.length >= 5 && nameMatchScore(query, cand) >= 82) return true;
+    return false;
+  });
+}
+
+// Lowercase, strip diacritics and punctuation, collapse spaces. Keeps word breaks
+// so we can do whole-word matching.
+function normalizeName(value) {
+  return (value || '')
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
 }
 
 // ---------- Pokémon (TCGdex) ----------
