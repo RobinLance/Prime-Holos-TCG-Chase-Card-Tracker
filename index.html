@@ -333,7 +333,7 @@ chaseForm.addEventListener('submit', async event => {
     pricePhp: Number(document.getElementById('chasePhp').value) || null
   };
   try {
-    const endpoint = editingChaseId ? '/api/chase-cards/' + editingChaseId : '/api/chase-cards';
+    const endpoint = API_BASE + (editingChaseId ? '/api/chase-cards/' + editingChaseId : '/api/chase-cards');
     const response = await fetch(endpoint, { method: editingChaseId ? 'PUT' : 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(card) });
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || 'Could not save card');
@@ -1468,7 +1468,7 @@ function getJustTcgImage(card, size = 'large') {
 async function searchJustTcg(name, shouldRender = true, gameOverride = '') {
   const game = gameOverride || justtcgGameSelect.value;
   if (!game) { if (shouldRender) renderTiles([]); return []; }
-  const url = '/api/justtcg/search?q=' + encodeURIComponent(name) +
+  const url = API_BASE + '/api/justtcg/search?q=' + encodeURIComponent(name) +
               '&game=' + encodeURIComponent(game);
   const res = await fetch(url);
   const json = await res.json();
