@@ -171,10 +171,20 @@ video, canvas, .shot-preview{
 }
 .frame-guide{
   position:absolute; inset:8%;
-  border:1.5px dashed rgba(234,231,221,0.35);
+  border:1.5px dashed rgba(234,231,221,0.28);
   border-radius:12px;
   pointer-events:none;
 }
+.card-outline{
+  position:absolute;
+  border:2px solid var(--foil-a);
+  border-radius:10px;
+  box-shadow:0 0 0 1px rgba(0,0,0,0.35), 0 0 22px rgba(125,227,208,0.45);
+  pointer-events:none;
+  opacity:0;
+  transition:opacity 0.18s ease;
+}
+.card-outline.on{ opacity:1; }
 .controls{ display:flex; gap:10px; margin-top:14px; flex-wrap:wrap; }
 
 button{
