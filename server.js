@@ -386,8 +386,8 @@ async function handleApi(req, res, url) {
     const game = url.searchParams.get('game');
     const imageHash = url.searchParams.get('imageHash');
     const nameMatches = findChaseCards(query, game);
-    const imageMatches = imageHash && chaseCardsForLookup().map(card => ({ ...card, score: imageHashScore(imageHash, card.imageHash), imageMatch: true }))
-      .filter(card => card.game === game && card.imageHash && card.score >= 82).sort((left, right) => right.score - left.score).slice(0, 10);
+    const imageMatches = imageHash ? chaseCardsForLookup().map(card => ({ ...card, score: imageHashScore(imageHash, card.imageHash), imageMatch: true }))
+      .filter(card => card.game === game && card.imageHash && card.score >= 82).sort((left, right) => right.score - left.score).slice(0, 10) : [];
     const merged = new Map([...nameMatches, ...imageMatches].map(card => [card.game + '|' + card.name, card]));
     return sendJson(res, 200, { data: Array.from(merged.values()).sort((left, right) => right.score - left.score) });
   }

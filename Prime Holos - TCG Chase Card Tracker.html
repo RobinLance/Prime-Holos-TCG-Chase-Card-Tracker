@@ -146,7 +146,9 @@
 <footer>Card data and prices pulled live from tcgdex.dev, PokePriceTracker, Scryfall, and YGOPRODeck. Prototype — not financial advice.</footer>
 
 <script>
-const API_BASE = 'https://prime-holos-api.onrender.com';
+const API_BASE = ['localhost', '127.0.0.1'].includes(location.hostname)
+  ? ''
+  : 'https://prime-holos-api.onrender.com';
 
 const video = document.getElementById('video');
 const canvas = document.getElementById('canvas');
