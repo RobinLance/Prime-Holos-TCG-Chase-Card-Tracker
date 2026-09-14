@@ -146,6 +146,8 @@
 <footer>Card data and prices pulled live from tcgdex.dev, PokePriceTracker, Scryfall, and YGOPRODeck. Prototype — not financial advice.</footer>
 
 <script>
+const API_BASE = 'https://prime-holos-api.onrender.com';
+
 const video = document.getElementById('video');
 const canvas = document.getElementById('canvas');
 const startCam = document.getElementById('startCam');
@@ -226,7 +228,7 @@ loadHighValueCards();
 
 async function loadHighValueCards() {
   try {
-    let response = await fetch('/api/chase-cards?search=');
+    let response = await fetch(API_BASE + '/api/chase-cards?search=');
     let payload = response.ok ? await response.json() : null;
     if (!payload) {
       response = await fetch('chase-cards.json');
@@ -289,7 +291,7 @@ function addLiveHighValueCards(tiles) {
 async function searchChaseDatabase() {
   databaseResults.textContent = 'Searching database…';
   try {
-    const response = await fetch('/api/chase-cards?search=' + encodeURIComponent(databaseSearch.value.trim()));
+    const response = await fetch(API_BASE + '/api/chase-cards?search=' + encodeURIComponent(databaseSearch.value.trim()));
     const cards = (await response.json()).data || [];
     databaseResults.innerHTML = cards.length ? '' : '<div class="empty">No saved chase cards found.</div>';
     cards.forEach(card => {
@@ -363,7 +365,7 @@ chaseImageFile.addEventListener('change', event => {
 async function loadJustTcgGames() {
   if (justtcgGamesLoaded) return;
   try {
-    const res = await fetch('/api/justtcg/games');
+    const res = await fetch(API_BASE + '/api/justtcg/games');
     if (!res.ok) throw new Error('API returned ' + res.status);
     const json = await res.json();
     const games = json.data || [];
@@ -729,7 +731,7 @@ async function runOCR() {
   try {
     let cardsightNames = [];
     try {
-      const cardsightResponse = await fetch('/api/cardsight/identify', {
+      const cardsightResponse = await fetch(API_BASE + '/api/cardsight/identify', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ image: currentImageDataUrl })
@@ -752,7 +754,7 @@ async function runOCR() {
     try {
       const canvas = document.getElementById('canvas');
       const dataUrl = canvas.toDataURL('image/png');
-      const response = await fetch('/api/ocr', {
+      const response = await fetch(API_BASE + '/api/ocr', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(dataUrl.split(',')[1])
@@ -954,7 +956,7 @@ async function gradeCurrentCard() {
   gradeResult.hidden = false;
   gradeResult.textContent = 'Submitting image for AI grading…';
   try {
-    const submitResponse = await fetch('/api/card-grade', {
+    const submitResponse = await fetch(API_BASE + '/api/card-grade', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ image: currentImageDataUrl })
@@ -966,7 +968,7 @@ async function gradeCurrentCard() {
 
     for (let attempt = 0; attempt < 45; attempt++) {
       await new Promise(resolve => setTimeout(resolve, 2000));
-      const statusResponse = await fetch('/api/card-grade/' + encodeURIComponent(submitted.id));
+      const statusResponse = await fetch(API_BASE + '/api/card-grade/' + encodeURIComponent(submitted.id));
       const status = await statusResponse.json();
       if (!statusResponse.ok) throw new Error(status.error || 'Could not read grading status.');
       if (status.status === 'DONE') {
@@ -1032,7 +1034,7 @@ async function searchCards(name, automatic, guesses) {
   chaseAlert.textContent = '';
   cardGrid.innerHTML = '<div class="empty">Comparing similar cards from ' + GAME_META[currentGame].source + '…</div>';
   try {
-    const chaseResponse = await fetch('/api/chase-cards?q=' + encodeURIComponent(name) + '&game=' + encodeURIComponent(currentGame) + '&imageHash=' + encodeURIComponent(currentImageHash));
+    const chaseResponse = await fetch(API_BASE + '/api/chase-cards?q=' + encodeURIComponent(name) + '&game=' + encodeURIComponent(currentGame) + '&imageHash=' + encodeURIComponent(currentImageHash));
     if (chaseResponse.ok) {
       const chaseMatches = (await chaseResponse.json()).data || [];
       if (chaseMatches.length) {
@@ -1283,7 +1285,7 @@ async function findClosestPokemonName(query) {
 
 async function searchTcgplayer(name, shouldRender = true) {
   const categoryId = GAME_META[currentGame].tcgplayerCategory;
-  const response = await fetch('/api/tcgplayer/search?q=' + encodeURIComponent(name) + '&categoryId=' + categoryId);
+  const response = await fetch(API_BASE + '/api/tcgplayer/search?q=' + encodeURIComponent(name) + '&categoryId=' + categoryId);
   if (!response.ok) throw new Error('TCGplayer is unavailable. Start server.js with API credentials.');
   const cards = (await response.json()).data || [];
   const tiles = cards.map(card => ({
@@ -1305,7 +1307,7 @@ async function searchTcgplayer(name, shouldRender = true) {
 }
 
 async function searchPokePriceTracker(name, shouldRender = true) {
-  const response = await fetch('/api/pokeprice/search?q=' + encodeURIComponent(name));
+  const response = await fetch(API_BASE + '/api/pokeprice/search?q=' + encodeURIComponent(name));
   const json = await response.json();
   if (!response.ok) throw new Error(json.error || 'PokePriceTracker API returned ' + response.status);
   const tiles = (json.data || []).map(card => {
@@ -1582,7 +1584,7 @@ const phpRatePromises = new Map();
 function loadPhpRate(currency) {
   const normalizedCurrency = currency.toUpperCase();
   if (!phpRatePromises.has(normalizedCurrency)) {
-    phpRatePromises.set(normalizedCurrency, fetch('/api/exchange/' + normalizedCurrency.toLowerCase() + '-php')
+    phpRatePromises.set(normalizedCurrency, fetch(API_BASE + '/api/exchange/' + normalizedCurrency.toLowerCase() + '-php')
       .then(response => response.ok ? response.json() : Promise.reject(new Error('rate unavailable')))
       .then(data => Number(data.rate)));
   }
