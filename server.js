@@ -509,7 +509,7 @@ async function handleApi(req, res, url) {
 
 http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
-  const allowedOrigin = process.env.FRONTEND_ORIGIN || '*';
+  const allowedOrigin = process.env.FRONTEND_ORIGIN || 'https://robinlance.github.io';
   if (req.headers.origin && (allowedOrigin === '*' || req.headers.origin === allowedOrigin)) {
     res.setHeader('access-control-allow-origin', req.headers.origin);
     res.setHeader('vary', 'Origin');
