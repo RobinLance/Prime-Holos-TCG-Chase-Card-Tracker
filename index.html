@@ -478,11 +478,14 @@ fileInput.addEventListener('change', (e) => {
 });
 
 function useImageFromCanvas() {
-  // Auto-detect the card and crop/zoom onto it so the user doesn't have to be precise.
+  // Use the entire captured frame for API matching and OCR so the card detector sees the
+  // full card artwork instead of a tightly cropped window.
   const box = cardSightSourceBox || detectCardBox(canvas);
   cardSightSourceBox = null;
-  ocrSourceCanvas = cropToBox(canvas, box);
-  const dataUrl = ocrSourceCanvas.toDataURL('image/png');
+  // Keep the full image for external APIs and hashing, while still using the box to
+  // display the visual detection overlay in the live camera view.
+  ocrSourceCanvas = canvas;
+  const dataUrl = canvas.toDataURL('image/png');
   currentImageDataUrl = dataUrl;
   shotPreview.src = dataUrl;
   shotPreview.style.display = 'block';
@@ -493,8 +496,8 @@ function useImageFromCanvas() {
   gradeResult.hidden = true;
   gradeResult.textContent = '';
   camStatus.textContent = box
-    ? 'Card detected — auto-cropped and zoomed for reading.'
-    : 'Captured. Could not isolate the card, using the full frame.';
+    ? 'Card detected — using the full frame for matching and OCR.'
+    : 'Captured. Using the full frame for matching and OCR.';
   runOCR();
 }
 
