@@ -185,6 +185,7 @@ let cardSightLastAttempt = 0;
 let cardSightBox = null;
 let cardSightSourceBox = null;
 let cardSightAvailable = false;
+let cardSightSession = 0;
 const outlineCanvas = document.createElement('canvas');
 let stream = null;
 let currentImageHash = '';
@@ -658,7 +659,12 @@ function startCardDetection() {
     ctx.drawImage(video, 0, 0, w, h);
     const localBox = detectCardBox(outlineCanvas);
     const box = cardSightAvailable && cardSightBox ? cardSightBox : localBox;
-    if (!box) { cardOutline.classList.remove('on'); return; }
+    requestCardSightDetection(w, h, localBox);
+    if (!box) {
+      cardOutline.classList.remove('on');
+      camStatus.textContent = 'Looking for a card… You can still capture manually.';
+      return;
+    }
     if (stableCardBox && Math.abs(box.left - stableCardBox.left) < w * 0.08 && Math.abs(box.top - stableCardBox.top) < h * 0.08) {
       stableCardFrames++;
     } else {
@@ -681,11 +687,11 @@ function startCardDetection() {
       camStatus.textContent = 'Card steady — capturing and auto-cropping…';
       captureVideoFrame();
     }
-    requestCardSightDetection(w, h);
   }, 300);
 }
 function stopCardDetection() {
   if (outlineTimer) { clearInterval(outlineTimer); outlineTimer = null; }
+  cardSightSession++;
   cardOutline.classList.remove('on');
   cardSightBox = null;
   cardSightSourceBox = null;
@@ -722,9 +728,10 @@ function readCardSightBox(payload, width, height) {
   return null;
 }
 
-async function requestCardSightDetection(width, height) {
+async function requestCardSightDetection(width, height, localBox) {
   const now = Date.now();
   if (cardSightRequestInFlight || now - cardSightLastAttempt < 1500 || !video.videoWidth) return;
+  const session = cardSightSession;
   cardSightLastAttempt = now;
   cardSightRequestInFlight = true;
   try {
@@ -739,15 +746,18 @@ async function requestCardSightDetection(width, height) {
     });
     if (!response.ok) throw new Error('CardSight returned ' + response.status);
     const result = await response.json();
+    if (session !== cardSightSession) return;
     const box = readCardSightBox(result.data, requestCanvas.width, requestCanvas.height);
-    cardSightBox = box;
-    cardSightSourceBox = box ? {
-      left: Math.round(box.left * video.videoWidth / requestCanvas.width),
-      top: Math.round(box.top * video.videoHeight / requestCanvas.height),
-      width: Math.round(box.width * video.videoWidth / requestCanvas.width),
-      height: Math.round(box.height * video.videoHeight / requestCanvas.height)
+    // CardSight identifies cards, but its identify response may not include geometry.
+    // Keep the local rectangle detector in charge of the outline when no box is returned.
+    cardSightBox = box || localBox || null;
+    cardSightSourceBox = (box || localBox) ? {
+      left: Math.round((box || localBox).left * video.videoWidth / requestCanvas.width),
+      top: Math.round((box || localBox).top * video.videoHeight / requestCanvas.height),
+      width: Math.round((box || localBox).width * video.videoWidth / requestCanvas.width),
+      height: Math.round((box || localBox).height * video.videoHeight / requestCanvas.height)
     } : null;
-    cardSightAvailable = Boolean(box);
+    cardSightAvailable = Boolean(box || localBox);
     if (box) camStatus.textContent = 'CardSight detected a card. Hold it steady for automatic capture.';
   } catch (error) {
     // CardSight is authoritative when available; the local detector keeps the camera usable during outages.
@@ -849,6 +859,17 @@ function isLikelyCardName(text) {
   return true;
 }
 
+function extractCardSightNames(payload) {
+  const source = payload?.detections || payload?.cards || payload?.results ||
+    payload?.identifications || payload?.data || payload;
+  const detections = Array.isArray(source) ? source : [source];
+  return detections
+    .map(card => typeof card === 'string' ? card :
+      card?.card_name || card?.cardName || card?.name || card?.title ||
+      card?.card?.name || card?.card?.card_name || '')
+    .filter(Boolean);
+}
+
 async function runOCR() {
   ocrStatus.textContent = 'Reading card name…';
   ocrStatus.classList.add('active');
@@ -863,11 +884,7 @@ async function runOCR() {
       });
       const cardsightJson = await cardsightResponse.json();
       if (cardsightResponse.ok && cardsightJson.data) {
-        const payload = cardsightJson.data;
-        const detections = payload.detections || payload.cards || payload.results || payload.data || [];
-        cardsightNames = (Array.isArray(detections) ? detections : [detections])
-          .map(card => card.card_name || card.name || card.title || card.card?.name || card.card?.card_name || '')
-          .filter(Boolean);
+        cardsightNames = extractCardSightNames(cardsightJson.data);
       }
     } catch (error) {
       console.log('CardSight AI not available, continuing with OCR:', error.message);
