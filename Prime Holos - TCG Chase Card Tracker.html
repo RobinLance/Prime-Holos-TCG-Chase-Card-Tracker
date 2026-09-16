@@ -750,14 +750,14 @@ async function requestCardSightDetection(width, height, localBox) {
     const box = readCardSightBox(result.data, requestCanvas.width, requestCanvas.height);
     // CardSight identifies cards, but its identify response may not include geometry.
     // Keep the local rectangle detector in charge of the outline when no box is returned.
-    cardSightBox = box || localBox || null;
+    cardSightBox = box;
     cardSightSourceBox = (box || localBox) ? {
       left: Math.round((box || localBox).left * video.videoWidth / requestCanvas.width),
       top: Math.round((box || localBox).top * video.videoHeight / requestCanvas.height),
       width: Math.round((box || localBox).width * video.videoWidth / requestCanvas.width),
       height: Math.round((box || localBox).height * video.videoHeight / requestCanvas.height)
     } : null;
-    cardSightAvailable = Boolean(box || localBox);
+    cardSightAvailable = Boolean(box);
     if (box) camStatus.textContent = 'CardSight detected a card. Hold it steady for automatic capture.';
   } catch (error) {
     // CardSight is authoritative when available; the local detector keeps the camera usable during outages.
