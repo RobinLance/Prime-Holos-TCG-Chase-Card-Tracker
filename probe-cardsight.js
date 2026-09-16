@@ -1,7 +1,8 @@
 const token = '98dc2360000f4d5cb33e9ba346cb8021';
-// tiny blank png
-const pngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
-const buf = Buffer.from(pngBase64, 'base64');
+const fs = require('fs');
+const path = require('path');
+const imagePath = path.join(__dirname, 'assets', 'prime-holos-logo.jpg');
+const buf = fs.readFileSync(imagePath);
 
 async function tryEndpoint(name, fn) {
   try {
@@ -21,7 +22,7 @@ async function tryEndpoint(name, fn) {
   const endpoints = [
     { name: 'POST /v1/identify/card (multipart image)', fn: async () => {
       const form = new FormData();
-      form.append('image', new Blob([buf], { type: 'image/png' }), 'card.png');
+      form.append('image', new Blob([buf], { type: 'image/jpeg' }), 'card.jpg');
       return fetch('https://api.cardsight.ai/v1/identify/card', {
         method: 'POST',
         headers: { 'X-API-Key': token },
