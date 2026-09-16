@@ -177,6 +177,14 @@ const gameSwitch = document.getElementById('gameSwitch');
 const sourceTag = document.getElementById('sourceTag');
 const cardOutline = document.getElementById('cardOutline');
 let outlineTimer = null;
+let stableCardBox = null;
+let stableCardFrames = 0;
+let autoCaptureLocked = false;
+let cardSightRequestInFlight = false;
+let cardSightLastAttempt = 0;
+let cardSightBox = null;
+let cardSightSourceBox = null;
+let cardSightAvailable = false;
 const outlineCanvas = document.createElement('canvas');
 let stream = null;
 let currentImageHash = '';
@@ -424,8 +432,11 @@ startCam.addEventListener('click', async () => {
     await video.play();
     shootBtn.disabled = false;
     startCam.textContent = 'Restart camera';
+    stableCardBox = null;
+    stableCardFrames = 0;
+    autoCaptureLocked = false;
     startCardDetection();
-    camStatus.textContent = 'Camera live. Just point it at a card — it auto-detects and zooms onto the card when you capture.';
+    camStatus.textContent = 'Camera live. Hold a card in view — it will auto-crop and capture when steady.';
   } catch (err) {
     shootBtn.disabled = true;
     const reason = err.name === 'NotAllowedError'
@@ -437,7 +448,7 @@ startCam.addEventListener('click', async () => {
   }
 });
 
-shootBtn.addEventListener('click', () => {
+function captureVideoFrame() {
   if (!video.videoWidth || !video.videoHeight) {
     camStatus.textContent = 'Camera is still starting. Try Capture again in a moment.';
     return;
@@ -445,8 +456,11 @@ shootBtn.addEventListener('click', () => {
   canvas.width = video.videoWidth;
   canvas.height = video.videoHeight;
   canvas.getContext('2d', { alpha: false }).drawImage(video, 0, 0, canvas.width, canvas.height);
+  stopCardDetection();
   useImageFromCanvas();
-});
+}
+
+shootBtn.addEventListener('click', captureVideoFrame);
 
 fileInput.addEventListener('change', (e) => {
   const file = e.target.files[0];
@@ -464,7 +478,8 @@ fileInput.addEventListener('change', (e) => {
 
 function useImageFromCanvas() {
   // Auto-detect the card and crop/zoom onto it so the user doesn't have to be precise.
-  const box = detectCardBox(canvas);
+  const box = cardSightSourceBox || detectCardBox(canvas);
+  cardSightSourceBox = null;
   ocrSourceCanvas = cropToBox(canvas, box);
   const dataUrl = ocrSourceCanvas.toDataURL('image/png');
   currentImageDataUrl = dataUrl;
@@ -561,21 +576,46 @@ function detectCardBox(sourceCanvas) {
   };
   const cols = span(colFrac, 0.4);
   const rows = span(rowFrac, 0.4);
-  if (!cols || !rows) return null;
+  if (cols && rows) {
+    const left = Math.round((cols[0] / w) * width);
+    const right = Math.round(((cols[1] + 1) / w) * width);
+    const top = Math.round((rows[0] / h) * height);
+    const bottom = Math.round(((rows[1] + 1) / h) * height);
+    const boxW = right - left;
+    const boxH = bottom - top;
+    const areaFrac = (boxW * boxH) / (width * height);
+    const aspect = boxH / boxW;
+    if (areaFrac >= 0.08 && areaFrac <= 0.98 && aspect >= 0.9 && aspect <= 2.4) {
+      return { left, top, width: boxW, height: boxH };
+    }
+  }
 
-  // Convert back to full-resolution pixels, then verify it looks like a card
-  // (a portrait rectangle occupying a reasonable chunk of the frame).
-  const left = Math.round((cols[0] / w) * width);
-  const right = Math.round(((cols[1] + 1) / w) * width);
-  const top = Math.round((rows[0] / h) * height);
-  const bottom = Math.round(((rows[1] + 1) / h) * height);
-  const boxW = right - left;
-  const boxH = bottom - top;
-  const areaFrac = (boxW * boxH) / (width * height);
-  const aspect = boxH / boxW;
-  if (areaFrac < 0.12 || areaFrac > 0.98) return null;   // too small / basically whole frame
-  if (aspect < 0.9 || aspect > 2.4) return null;          // not portrait-card shaped
-  return { left, top, width: boxW, height: boxH };
+  // Dark or foil cards can fail the brightness test. Use the portrait guide as
+  // a fallback only when its center has enough visual variation to be a card.
+  const fallbackWidth = Math.round(width * 0.52);
+  const fallbackHeight = Math.round(height * 0.84);
+  const fallbackLeft = Math.round((width - fallbackWidth) / 2);
+  const fallbackTop = Math.round((height - fallbackHeight) / 2);
+  let centerSum = 0;
+  let centerSquares = 0;
+  let centerCount = 0;
+  let outsideSum = 0;
+  let outsideCount = 0;
+  for (let y = 0; y < h; y += 4) {
+    for (let x = 0; x < w; x += 4) {
+      const value = gray[y * w + x];
+      const inside = x >= w * 0.24 && x <= w * 0.76 && y >= h * 0.08 && y <= h * 0.92;
+      if (inside) { centerSum += value; centerSquares += value * value; centerCount++; }
+      else { outsideSum += value; outsideCount++; }
+    }
+  }
+  const centerMean = centerSum / Math.max(1, centerCount);
+  const centerVariance = centerSquares / Math.max(1, centerCount) - centerMean * centerMean;
+  const outsideMean = outsideSum / Math.max(1, outsideCount);
+  if (centerVariance > 900 || Math.abs(centerMean - outsideMean) > 18) {
+    return { left: fallbackLeft, top: fallbackTop, width: fallbackWidth, height: fallbackHeight };
+  }
+  return null;
 }
 
 // Draw the source onto a new canvas cropped to `box`, with a little padding,
@@ -616,8 +656,15 @@ function startCardDetection() {
     outlineCanvas.height = h;
     const ctx = outlineCanvas.getContext('2d', { willReadFrequently: true });
     ctx.drawImage(video, 0, 0, w, h);
-    const box = detectCardBox(outlineCanvas);
+    const localBox = detectCardBox(outlineCanvas);
+    const box = cardSightAvailable && cardSightBox ? cardSightBox : localBox;
     if (!box) { cardOutline.classList.remove('on'); return; }
+    if (stableCardBox && Math.abs(box.left - stableCardBox.left) < w * 0.08 && Math.abs(box.top - stableCardBox.top) < h * 0.08) {
+      stableCardFrames++;
+    } else {
+      stableCardBox = box;
+      stableCardFrames = 1;
+    }
     const rect = video.getBoundingClientRect();
     const wrap = cardOutline.parentElement.getBoundingClientRect();
     const offsetX = rect.left - wrap.left;
@@ -629,11 +676,87 @@ function startCardDetection() {
     cardOutline.style.width = (box.width * sx) + 'px';
     cardOutline.style.height = (box.height * sy) + 'px';
     cardOutline.classList.add('on');
+    if (stableCardFrames >= 3 && !autoCaptureLocked) {
+      autoCaptureLocked = true;
+      camStatus.textContent = 'Card steady — capturing and auto-cropping…';
+      captureVideoFrame();
+    }
+    requestCardSightDetection(w, h);
   }, 300);
 }
 function stopCardDetection() {
   if (outlineTimer) { clearInterval(outlineTimer); outlineTimer = null; }
   cardOutline.classList.remove('on');
+  cardSightBox = null;
+  cardSightSourceBox = null;
+  cardSightAvailable = false;
+  cardSightRequestInFlight = false;
+}
+
+function readCardSightBox(payload, width, height) {
+  const source = payload?.detections || payload?.cards || payload?.results || payload?.data || payload;
+  const detections = Array.isArray(source) ? source : [source];
+  for (const detection of detections) {
+    const raw = detection?.bounding_box || detection?.boundingBox || detection?.bbox || detection?.box || detection;
+    if (!raw || typeof raw !== 'object') continue;
+    const left = Number(raw.left ?? raw.x ?? raw.x1);
+    const top = Number(raw.top ?? raw.y ?? raw.y1);
+    const right = Number(raw.right ?? raw.x2);
+    const bottom = Number(raw.bottom ?? raw.y2);
+    const rawWidth = Number(raw.width ?? (Number.isFinite(right) ? right - left : NaN));
+    const rawHeight = Number(raw.height ?? (Number.isFinite(bottom) ? bottom - top : NaN));
+    if (![left, top, rawWidth, rawHeight].every(Number.isFinite) || rawWidth <= 0 || rawHeight <= 0) continue;
+    const normalized = Math.max(Math.abs(left), Math.abs(top), Math.abs(rawWidth), Math.abs(rawHeight)) <= 1;
+    const scaleX = normalized ? width : 1;
+    const scaleY = normalized ? height : 1;
+    const box = {
+      left: Math.round(left * scaleX),
+      top: Math.round(top * scaleY),
+      width: Math.round(rawWidth * scaleX),
+      height: Math.round(rawHeight * scaleY)
+    };
+    if (box.width >= width * 0.15 && box.height >= height * 0.15 &&
+        box.left + box.width > 0 && box.top + box.height > 0 &&
+        box.left < width && box.top < height) return box;
+  }
+  return null;
+}
+
+async function requestCardSightDetection(width, height) {
+  const now = Date.now();
+  if (cardSightRequestInFlight || now - cardSightLastAttempt < 1500 || !video.videoWidth) return;
+  cardSightLastAttempt = now;
+  cardSightRequestInFlight = true;
+  try {
+    const requestCanvas = document.createElement('canvas');
+    requestCanvas.width = width;
+    requestCanvas.height = height;
+    requestCanvas.getContext('2d', { alpha: false }).drawImage(video, 0, 0, requestCanvas.width, requestCanvas.height);
+    const response = await fetch(API_BASE + '/api/cardsight/identify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ image: requestCanvas.toDataURL('image/jpeg', 0.78) })
+    });
+    if (!response.ok) throw new Error('CardSight returned ' + response.status);
+    const result = await response.json();
+    const box = readCardSightBox(result.data, requestCanvas.width, requestCanvas.height);
+    cardSightBox = box;
+    cardSightSourceBox = box ? {
+      left: Math.round(box.left * video.videoWidth / requestCanvas.width),
+      top: Math.round(box.top * video.videoHeight / requestCanvas.height),
+      width: Math.round(box.width * video.videoWidth / requestCanvas.width),
+      height: Math.round(box.height * video.videoHeight / requestCanvas.height)
+    } : null;
+    cardSightAvailable = Boolean(box);
+    if (box) camStatus.textContent = 'CardSight detected a card. Hold it steady for automatic capture.';
+  } catch (error) {
+    // CardSight is authoritative when available; the local detector keeps the camera usable during outages.
+    cardSightAvailable = false;
+    cardSightBox = null;
+    console.log('CardSight camera detection unavailable, using local detection:', error.message);
+  } finally {
+    cardSightRequestInFlight = false;
+  }
 }
 
 function makeOcrImage(startRatio, heightRatio, sourceCanvas) {
